@@ -7,12 +7,18 @@ import nglview as nv
 from IPython.display import display, HTML
 from collections import Counter
 
+
 class SupercellCreator:
-    def __init__(self, cif_file, x_scaling, y_scaling, z_scaling):
-        self.structure = read(cif_file)  # Load the structure from the CIF file
-        self.scaling_matrix = (x_scaling, y_scaling, z_scaling)  # Scaling factors
-        self.supercell = self.make_supercell()  # Create the supercell
-        self.stoichiometry = self.get_stoichiometry()  # Get the stoichiometry from the CIF file
+    def __init__(self, cif_file, x_scaling, y_scaling, z_scaling, qc_radius=None, ecp_radius=None, pc_radius=None):
+        self.structure = read(cif_file) 
+        self.scaling_matrix = (x_scaling, y_scaling, z_scaling)  
+        self.supercell = self.make_supercell()  
+        self.stoichiometry = self.get_stoichiometry()  
+
+        # Use provided radii or default values based on cell size
+        self.qc_radius = qc_radius or self.calculate_default_radii()[0]
+        self.ecp_radius = ecp_radius or self.calculate_default_radii()[1]
+        self.pc_radius = pc_radius or self.calculate_default_radii()[2]
 
     def make_supercell(self):
         """Create a supercell based on the given scaling factors."""
@@ -25,27 +31,19 @@ class SupercellCreator:
     def get_stoichiometry(self):
         """Determine the stoichiometry of the structure."""
         element_counts = Counter(atom.symbol for atom in self.structure)  # Count atoms by element
-        min_count = min(element_counts.values())  # Find the smallest number of atoms for any element
-        stoichiometry = {element: count // min_count for element, count in element_counts.items()}  # Normalize ratios
-        return stoichiometry
+        return element_counts  
 
-    def calculate_radii(self):
-        """Calculate the radii for different layers based on the supercell dimensions."""
+    def calculate_default_radii(self):
+        """Calculate default radii for different layers based on the supercell dimensions."""
         cell = self.supercell.get_cell()  # Get the cell vectors
         cell_length = np.max(np.linalg.norm(cell, axis=1))  # Calculate the lengths of the cell vectors
 
-        # Define the number of layers and unit cells
-        qc_unit_cell_num = 1
-        ecp_layer_num = 1
+        # Calculate the default radii
+        qc_radius = cell_length / 8.0  # Default QC layer radius based on unit cell size
+        ecp_radius = qc_radius + (cell_length / 8.0)  # Default ECP layer radius
+        pc_radius = ecp_radius + (cell_length / 8.0 * 5)  # Default PC layer radius
 
-        # Calculate the radii
-        qc_radius = cell_length / 10.0 * qc_unit_cell_num  # QC layer radius based on unit cell size
-        ecp_radius = qc_radius + (cell_length / 10.0) * ecp_layer_num  # ECP layer radius
-
-        # Calculate the maximum radius for PC layers
-        pc_radius = ecp_radius + (cell_length / 10.0 * 5)  # 5 layers of PC, adjust as needed
-
-        return qc_radius, ecp_radius, pc_radius  # Return the calculated radii
+        return qc_radius, ecp_radius, pc_radius  
 
     def get_atoms_in_layers(self):
         """Retrieve atoms in each defined layer while retaining stoichiometry in the QC region."""
@@ -54,37 +52,40 @@ class SupercellCreator:
         pc_atoms_list = []
 
         cell_center = self.get_cell_center()  # Get the center of the supercell
-        qc_radius, ecp_radius, pc_radius = self.calculate_radii()  # Calculate the radii
 
         # Create counters to track how many atoms of each type have been added
         element_count = Counter()
         target_ratios = self.stoichiometry  # Stoichiometry ratios obtained from CIF
 
-        # First pass: select the QC atoms based on distance and stoichiometry
+        # Calculate total number of QC atoms required based on stoichiometry
+        total_qc_atoms = sum(target_ratios.values())
+        qc_atom_counts = {element: int((count / total_qc_atoms) * sum(target_ratios.values())) for element, count in target_ratios.items()}
+
+        # First pass: collect distances and sort atoms by distance
+        distances = []
         for atom in self.supercell:
             distance = np.linalg.norm(atom.position - cell_center)
-            if distance <= qc_radius:
-                element = atom.symbol
-                # Check if adding this atom would maintain the stoichiometric ratio
-                total_atoms = sum(element_count.values()) + 1  # Include this atom in the count
-                element_target_ratio = target_ratios[element] / sum(target_ratios.values())
-                current_ratio = element_count[element] / total_atoms if total_atoms > 0 else 0
+            distances.append((distance, atom))
 
-                # Add the atom if its current ratio is within the desired stoichiometric ratio
-                if current_ratio <= element_target_ratio:
-                    qc_atoms_list.append(atom)
-                    element_count[element] += 1
+        # Sort atoms by distance to the cell center
+        distances.sort(key=lambda x: x[0])
+
+        # Select atoms while ensuring the correct stoichiometry
+        for distance, atom in distances:
+            if distance <= self.qc_radius and element_count[atom.symbol] < qc_atom_counts.get(atom.symbol, 0):
+                qc_atoms_list.append(atom)
+                element_count[atom.symbol] += 1
 
         # Second pass: determine the ECP atoms (outside QC but within ECP radius)
         for atom in self.supercell:
             distance = np.linalg.norm(atom.position - cell_center)
-            if qc_radius < distance <= ecp_radius:
+            if self.qc_radius < distance <= self.ecp_radius:
                 ecp_atoms_list.append(atom)
 
         # Third pass: determine the PC atoms (outside ECP radius)
         for atom in self.supercell:
             distance = np.linalg.norm(atom.position - cell_center)
-            if distance > ecp_radius:
+            if distance > self.ecp_radius:
                 pc_atoms_list.append(atom)
 
         # Convert lists of atoms back to Atoms objects
