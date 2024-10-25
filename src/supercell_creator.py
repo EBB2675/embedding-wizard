@@ -3,110 +3,79 @@ from ase import Atoms
 from ase.io import read, write
 from ase.build import make_supercell
 import numpy as np
-import nglview as nv
-from IPython.display import display, HTML
 from collections import Counter
+import nglview as nv
 
 
 class SupercellCreator:
-    def __init__(self, cif_file, x_scaling, y_scaling, z_scaling, qc_radius=None, ecp_radius=None, pc_radius=None):
-        self.structure = read(cif_file) 
-        self.scaling_matrix = (x_scaling, y_scaling, z_scaling)  
-        self.supercell = self.make_supercell()  
-        self.stoichiometry = self.get_stoichiometry()  
+    def __init__(self, cif_file, x_scaling=1, y_scaling=1, z_scaling=1, qc_radius=None, ecp_radius=None, pc_radius=None):
+        # Read CIF file and initialize structure
+        self.structure = read(cif_file)
+        self.scaling_matrix = (x_scaling, y_scaling, z_scaling)
+        self.supercell = self.make_supercell()
+        self.stoichiometry = self.get_stoichiometry()
 
-        # Use provided radii or default values based on cell size
-        self.qc_radius = qc_radius or self.calculate_default_radii()[0]
-        self.ecp_radius = ecp_radius or self.calculate_default_radii()[1]
-        self.pc_radius = pc_radius or self.calculate_default_radii()[2]
+        # Set radii based on defaults if not provided
+        self.qc_radius, self.ecp_radius, self.pc_radius = self.initialize_radii(qc_radius, ecp_radius, pc_radius)
 
     def make_supercell(self):
-        """Create a supercell based on the given scaling factors."""
-        return self.structure.repeat(self.scaling_matrix)  # Repeat the unit cell
-
-    def get_cell_center(self):
-        """Calculate the center of the supercell."""
-        return self.supercell.get_center_of_mass()  # Get the center based on the mass of the atoms
+        """Create the supercell using the scaling factors provided."""
+        return self.structure.repeat(self.scaling_matrix)
 
     def get_stoichiometry(self):
-        """Determine the stoichiometry of the structure."""
-        element_counts = Counter(atom.symbol for atom in self.structure)  # Count atoms by element
-        return element_counts  
+        """Determine and return the stoichiometry of the original structure."""
+        return Counter(atom.symbol for atom in self.structure)
 
-    def calculate_default_radii(self):
-        """Calculate default radii for different layers based on the supercell dimensions."""
-        cell = self.supercell.get_cell()  # Get the cell vectors
-        cell_length = np.max(np.linalg.norm(cell, axis=1))  # Calculate the lengths of the cell vectors
+    def initialize_radii(self, qc_radius, ecp_radius, pc_radius):
+        """Initialize default radii for QC, ECP, and PC layers if not provided."""
+        cell_length = np.max(np.linalg.norm(self.supercell.get_cell(), axis=1))
+        # Calculate default radii based on cell length if not provided
+        qc_radius = qc_radius or cell_length * 0.10
+        ecp_radius = ecp_radius or qc_radius + cell_length * 0.10
+        pc_radius = pc_radius or ecp_radius + cell_length * 0.70
+        return qc_radius, ecp_radius, pc_radius
 
-        # Calculate the default radii
-        qc_radius = cell_length / 8.0  # Default QC layer radius based on unit cell size
-        ecp_radius = qc_radius + (cell_length / 8.0)  # Default ECP layer radius
-        pc_radius = ecp_radius + (cell_length / 8.0 * 5)  # Default PC layer radius
+    def display_molecule_in_unit_cell(self):
+        """Display the molecule inside the unit cell using NGLView."""
+        print("Displaying the original unit cell with the molecule...")
+        view_widget = nv.show_ase(self.structure)  # Use NGLView to show the structure
+        return view_widget  # Return the widget for display in Jupyter
 
-        return qc_radius, ecp_radius, pc_radius  
+    def expand_supercell_based_on_radius(self, radius):
+        """Create a supercell view with atoms within a given radius from the center."""
+        cell_center = self.supercell.get_center_of_mass()
+        atoms_within_radius = [atom for atom in self.supercell if np.linalg.norm(atom.position - cell_center) <= radius]
+        expanded_supercell = Atoms(atoms_within_radius, cell=self.supercell.get_cell(), pbc=True)
+
+        print(f"Displaying supercell expanded to radius {radius}.")
+        view_widget = nv.show_ase(expanded_supercell)  # Use NGLView here as well
+        return view_widget  # Return the widget
 
     def get_atoms_in_layers(self):
-        """Retrieve atoms in each defined layer while retaining stoichiometry in the QC region."""
-        qc_atoms_list = []
-        ecp_atoms_list = []
-        pc_atoms_list = []
+        """Classify atoms into QC, ECP, and PC layers based on radii."""
+        cell_center = self.supercell.get_center_of_mass()
+        qc_atoms, ecp_atoms, pc_atoms = [], [], []
 
-        cell_center = self.get_cell_center()  # Get the center of the supercell
-
-        # Create counters to track how many atoms of each type have been added
-        element_count = Counter()
-        target_ratios = self.stoichiometry  # Stoichiometry ratios obtained from CIF
-
-        # Calculate total number of QC atoms required based on stoichiometry
-        total_qc_atoms = sum(target_ratios.values())
-        qc_atom_counts = {element: int((count / total_qc_atoms) * sum(target_ratios.values())) for element, count in target_ratios.items()}
-
-        # First pass: collect distances and sort atoms by distance
-        distances = []
         for atom in self.supercell:
             distance = np.linalg.norm(atom.position - cell_center)
-            distances.append((distance, atom))
+            if distance <= self.qc_radius:
+                qc_atoms.append(atom)
+            elif self.qc_radius < distance <= self.ecp_radius:
+                ecp_atoms.append(atom)
+            else:
+                pc_atoms.append(atom)
 
-        # Sort atoms by distance to the cell center
-        distances.sort(key=lambda x: x[0])
+        print(f"QC layer: {len(qc_atoms)} atoms, {dict(Counter(atom.symbol for atom in qc_atoms))}")
+        print(f"ECP layer: {len(ecp_atoms)} atoms, {dict(Counter(atom.symbol for atom in ecp_atoms))}")
+        print(f"PC layer: {len(pc_atoms)} atoms, {dict(Counter(atom.symbol for atom in pc_atoms))}")
 
-        # Select atoms while ensuring the correct stoichiometry
-        for distance, atom in distances:
-            if distance <= self.qc_radius and element_count[atom.symbol] < qc_atom_counts.get(atom.symbol, 0):
-                qc_atoms_list.append(atom)
-                element_count[atom.symbol] += 1
+        return (Atoms(qc_atoms, cell=self.supercell.get_cell(), pbc=True),
+                Atoms(ecp_atoms, cell=self.supercell.get_cell(), pbc=True),
+                Atoms(pc_atoms, cell=self.supercell.get_cell(), pbc=True))
 
-        # Second pass: determine the ECP atoms (outside QC but within ECP radius)
-        for atom in self.supercell:
-            distance = np.linalg.norm(atom.position - cell_center)
-            if self.qc_radius < distance <= self.ecp_radius:
-                ecp_atoms_list.append(atom)
-
-        # Third pass: determine the PC atoms (outside ECP radius)
-        for atom in self.supercell:
-            distance = np.linalg.norm(atom.position - cell_center)
-            if distance > self.ecp_radius:
-                pc_atoms_list.append(atom)
-
-        # Convert lists of atoms back to Atoms objects
-        qc_atoms = Atoms(qc_atoms_list, cell=self.supercell.get_cell(), pbc=True)
-        ecp_atoms = Atoms(ecp_atoms_list, cell=self.supercell.get_cell(), pbc=True)
-        pc_atoms = Atoms(pc_atoms_list, cell=self.supercell.get_cell(), pbc=True)
-
-        # Get individual atom counts
-        qc_counts = Counter(qc_atoms.get_chemical_symbols())
-        ecp_counts = Counter(ecp_atoms.get_chemical_symbols())
-        pc_counts = Counter(pc_atoms.get_chemical_symbols())
-
-        # Print total atom counts and individual atom counts
-        print(f"QC region: {len(qc_atoms_list)} atoms")
-        print(f"Individual counts: {dict(qc_counts)}")
-
-        print(f"ECP region: {len(ecp_atoms_list)} atoms")
-        print(f"Individual counts: {dict(ecp_counts)}")
-
-        print(f"PC region: {len(pc_atoms_list)} atoms")
-        print(f"Individual counts: {dict(pc_counts)}")
-
-        return qc_atoms, ecp_atoms, pc_atoms  # Return the Atoms objects for each layer
+# Usage example:
+# Ensure you are in a Jupyter Notebook to visualize the output
+# creator = SupercellCreator('path/to/your/file.cif')
+# view_widget = creator.display_molecule_in_unit_cell()
+# view_widget  # Execute this line to show the NGLView widget
 
