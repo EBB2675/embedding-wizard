@@ -1,23 +1,24 @@
 from ase.visualize import view
 from ase import Atoms
-from ase.io import read
+from ase.io import read, write
 from ase.build import make_supercell
 import numpy as np
 from collections import Counter
 import nglview as nv
 from scipy.spatial import distance_matrix
+from scipy.spatial.distance import pdist, squareform
 
 class SupercellCreator:
-    def __init__(self, cif_file, x_scaling=1, y_scaling=1, z_scaling=1, qc_radius=None, ecp_radius=None, pc_radius=None, bond_distance_threshold=2.5):
+    def __init__(self, cif_file, x_scaling=1, y_scaling=1, z_scaling=1, qc_radius=None, ecp_radius=None, pc_radius=None, bond_distance_threshold=2.7):
         self.structure = read(cif_file)
         self.scaling_matrix = (x_scaling, y_scaling, z_scaling)
         self.supercell = self.make_supercell()
         self.stoichiometry = self.get_stoichiometry()
-
         self.qc_radius, self.ecp_radius, self.pc_radius = self.initialize_radii(qc_radius, ecp_radius, pc_radius)
         self.bond_distance_threshold = bond_distance_threshold
 
     def make_supercell(self):
+
         return self.structure.repeat(self.scaling_matrix)
 
     def get_stoichiometry(self):
@@ -35,7 +36,7 @@ class SupercellCreator:
         qc_atoms, ecp_atoms, pc_atoms = [], [], []
         qc_charge = 0  # Initialize charge for the QC layer
 
-        # Step 1: Collect QC atoms based on distance
+        # Collect QC atoms based on distance
         for atom in self.supercell:
             distance = np.linalg.norm(atom.position - cell_center)
             atom_charge = charge_dict.get(atom.symbol, 0)
@@ -48,10 +49,10 @@ class SupercellCreator:
             else:
                 pc_atoms.append(atom)
 
-        # Step 2: Ensure QC layer atoms are directly bonded
+        # Ensure QC layer atoms are directly bonded
         qc_atoms = self.ensure_bonded(qc_atoms)
 
-        # Step 3: Finalize the QC layer to ensure it is neutral
+        # Finalize the QC layer to ensure it is neutral
         qc_atoms, qc_charge = self.finalize_qc_layer(qc_atoms, charge_dict)
 
         print(f"QC layer: {len(qc_atoms)} atoms, Charge: {qc_charge}, Composition: {dict(Counter(atom.symbol for atom in qc_atoms))}")
@@ -61,6 +62,12 @@ class SupercellCreator:
         return (Atoms(qc_atoms, cell=self.supercell.get_cell(), pbc=True),
                 Atoms(ecp_atoms, cell=self.supercell.get_cell(), pbc=True),
                 Atoms(pc_atoms, cell=self.supercell.get_cell(), pbc=True))
+
+    def display_unit_cell(self):
+        """Display the basic unit cell."""
+        print("Displaying the original unit cell...")
+        view = nv.show_ase(self.structure)
+        return view
 
     def ensure_bonded(self, atoms):
         if len(atoms) < 2:
@@ -124,10 +131,10 @@ class SupercellCreator:
     def remove_negatively_charged_atoms(self, qc_atoms, charge_dict):
         """Remove the minimum number of negatively charged atoms to achieve charge neutrality."""
         negatively_charged_atoms = [atom for atom in qc_atoms if charge_dict.get(atom.symbol, 0) < 0]
-        
+
         # Sort negatively charged atoms by charge magnitude (more negative first)
         negatively_charged_atoms.sort(key=lambda atom: charge_dict.get(atom.symbol, 0))
-        
+
         # Calculate the charge needed to reach neutrality
         charge_needed = sum(charge_dict.get(atom.symbol, 0) for atom in qc_atoms)
 
@@ -139,4 +146,107 @@ class SupercellCreator:
                 print(f"Removed negatively charged atom: {atom.symbol}")
 
         return qc_atoms  # Return the modified list of QC atoms
+
+    def isolate_unit_molecule(self, center_atom_symbol='Zr', bonded_symbol='Cl', bonding_threshold=2.7,
+                              exact_bonded_atoms=4, max_retries=25):
+        """
+        Isolate a single unit molecule (e.g., ZrCl4) from the supercell structure.
+        Continues checking until a tetrahedral structure is found or maximum retries are reached.
+
+        Parameters:
+        - center_atom_symbol: Symbol of the central atom (e.g., 'Zr').
+        - bonded_symbol: Symbol of atoms bonded to the center atom (e.g., 'Cl' for ZrCl4).
+        - bonding_threshold: Distance threshold for bonded atoms.
+        - exact_bonded_atoms: Exact number of bonded atoms expected in the molecule.
+        - max_retries: Maximum number of attempts to find a tetrahedral structure.
+
+        Returns:
+        - An ASE Atoms object representing one unit molecule or None if not found.
+        """
+        for attempt in range(max_retries):
+            # Create a supercell
+            supercell_3x3x3 = self.make_supercell()
+
+            for central_atom in supercell_3x3x3:
+                if central_atom.symbol != center_atom_symbol:
+                    continue
+
+                # Find bonded atoms within the threshold distance
+                bonded_atoms = [central_atom]
+                for atom in supercell_3x3x3:
+                    if atom.symbol == bonded_symbol:
+                        distance = np.linalg.norm(atom.position - central_atom.position)
+                        if distance <= bonding_threshold:
+                            bonded_atoms.append(atom)
+
+                # Check if the number of bonded atoms matches the expected exact number
+                num_bonded_atoms = len(bonded_atoms) - 1  # Exclude the central atom
+                if num_bonded_atoms == exact_bonded_atoms:
+                    isolated_molecule = Atoms(bonded_atoms, cell=supercell_3x3x3.get_cell(), pbc=False)
+
+                    # Check if the structure is tetrahedral
+                    if self.is_tetrahedral(center_atom_symbol=center_atom_symbol, bonded_symbol=bonded_symbol,
+                                            bonding_threshold=bonding_threshold, exact_bonded_atoms=exact_bonded_atoms):
+                        print(f"Isolated tetrahedral molecule: {len(isolated_molecule)} atoms, "
+                              f"Composition: {dict(Counter(atom.symbol for atom in bonded_atoms))}")
+                        return isolated_molecule
+
+            print("No tetrahedral structure found in this supercell. Retrying...")
+        
+        print("Maximum retries reached. No tetrahedral structure found.")
+        return None
+
+    def display_expanded_isolated_molecule(self, center_atom_symbol='Zr', bonded_symbol='Cl', bonding_threshold=2.7,
+                                            exact_bonded_atoms=4):
+        """
+        Display the isolated molecule in an expanded manner.
+
+        Parameters:
+        - center_atom_symbol: Symbol of the central atom (e.g., 'Zr').
+        - bonded_symbol: Symbol of atoms bonded to the center atom (e.g., 'Cl' for ZrCl4).
+        - bonding_threshold: Distance threshold for bonded atoms.
+        - exact_bonded_atoms: Exact number of bonded atoms expected in the molecule.
+        """
+        isolated_molecule = self.isolate_unit_molecule(center_atom_symbol, bonded_symbol, bonding_threshold, exact_bonded_atoms)
+
+        if isolated_molecule is not None:
+            print(f"Displaying expanded isolated molecule: {len(isolated_molecule)} atoms.")
+            view = nv.show_ase(isolated_molecule)
+            return view
+        else:
+            print("No isolated molecule found to display.")
+
+    def is_tetrahedral(self, center_atom_symbol='Zr', bonded_symbol='Cl', bonding_threshold=2.7, exact_bonded_atoms=4):
+        """
+        Check if the isolated molecule forms a tetrahedral structure.
+
+        Parameters:
+        - center_atom_symbol: Symbol of the central atom (e.g., 'Zr').
+        - bonded_symbol: Symbol of atoms bonded to the center atom (e.g., 'Cl' for ZrCl4).
+        - bonding_threshold: Distance threshold for bonded atoms.
+        - exact_bonded_atoms: Exact number of bonded atoms expected in the molecule.
+
+        Returns:
+        - True if the structure is tetrahedral, False otherwise.
+        """
+        isolated_molecule = self.isolate_unit_molecule(center_atom_symbol, bonded_symbol, bonding_threshold, exact_bonded_atoms)
+
+        if isolated_molecule is None or len(isolated_molecule) != exact_bonded_atoms + 1:
+            print("Not enough atoms to determine tetrahedral structure.")
+            return False
+
+        # Calculate the coordinates of the bonded atoms
+        central_atom_pos = isolated_molecule[0].position
+        bonded_atoms_pos = [atom.position for atom in isolated_molecule[1:]]
+
+        # Calculate distances from the central atom to the bonded atoms
+        distances = [np.linalg.norm(bonded_atom - central_atom_pos) for bonded_atom in bonded_atoms_pos]
+
+        # Check if distances are approximately equal (within a tolerance)
+        if all(abs(dist - distances[0]) < 0.4 for dist in distances):
+            print(f"The molecule is tetrahedral with central atom: {center_atom_symbol}")
+            return True
+        else:
+            print(f"The molecule is not tetrahedral with central atom: {center_atom_symbol}")
+            return False
 
