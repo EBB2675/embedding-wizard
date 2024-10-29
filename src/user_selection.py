@@ -1,70 +1,71 @@
 import numpy as np
-from ase import Atoms, Atom
-from ase.neighborlist import NeighborList
-from ase.io import read  # ASE reader for XYZ and CIF files
+from ase import Atoms
+from ase.io import read
+from ase.neighborlist import NeighborList  # Ensure the correct import
+import nglview as nv
 
 class UserDefinedQCRegion:
+    def __init__(self, cif_file, xyz_file):
+        self.cif_file = cif_file
+        self.xyz_file = xyz_file
+        self.qc_atoms = None
+        self.supercell = None
+        self.ecp_atoms = None
+        self.pc_atoms = None
     
-    def xyz_to_atoms(self, xyz_file_path):
-        """
-        Reads an XYZ file and converts it to an ASE Atoms object.
+    def read_xyz_to_atoms(self):
+        """Read the XYZ file and create an Atoms object for the QC region."""
+        self.qc_atoms = read(self.xyz_file)
+        print(f"QC region loaded with {len(self.qc_atoms)} atoms.")
 
-        Parameters:
-        - xyz_file_path: Path to the XYZ file.
+    def create_supercell(self, scaling_factors=(1, 1, 1)):
+        """Create a supercell from the CIF file."""
+        self.supercell = read(self.cif_file)
+        self.supercell *= scaling_factors
+        print(f"Supercell created with {len(self.supercell)} atoms.")
 
-        Returns:
-        - ASE Atoms object representing the molecule.
-        """
-        try:
-            atoms = read(xyz_file_path)
-            print(f"Loaded XYZ file with {len(atoms)} atoms.")
-            return atoms
-        except Exception as e:
-            print(f"Error loading XYZ file: {e}")
-            return None
+    def classify_atoms(self, ecp_distance=2.5):
+        """Classify atoms into QC, ECP, and PC layers."""
+        if self.qc_atoms is None or self.supercell is None:
+            raise ValueError("QC atoms or supercell not initialized.")
 
-    def match_qc_region_to_cif(self, xyz_atoms, cif_file_path, ecp_distance=3.0):
-        """
-        Matches QC region atoms from XYZ input to CIF structure, and adds an ECP layer around it.
+        # Get positions of QC atoms
+        qc_positions = self.qc_atoms.get_positions()
+        ecp_atoms_list = []
+        pc_atoms_list = []
 
-        Parameters:
-        - xyz_atoms: ASE Atoms object representing the QC region (from XYZ file).
-        - cif_file_path: Path to the CIF file.
-        - ecp_distance: Distance threshold to consider an atom as part of the ECP layer.
+        # Get positions of supercell atoms
+        positions = self.supercell.get_positions()
 
-        Returns:
-        - ASE Atoms object with QC region, ECP, and PC layers.
-        """
-        # Load CIF file
-        full_structure = read(cif_file_path)
-        print(f"Loaded CIF structure with {len(full_structure)} atoms.")
+        # Create a NeighborList for the supercell atoms
+        cutoffs = [ecp_distance] * len(positions)  # One cutoff for each atom in the supercell
+        neighbor_list = NeighborList(cutoffs, skin=0.3, sorted=False, self_interaction=True)
+        neighbor_list.update(self.supercell)  # Update with supercell atom positions
 
-        # Calculate the center of mass for the QC region
-        qc_com = xyz_atoms.get_center_of_mass()
+        for i, atom in enumerate(self.supercell):
+            # Check if the current atom is in the QC layer
+            if atom in self.qc_atoms:
+                pc_atoms_list.append(atom)
+                continue  # Skip QC atoms for further checking
 
-        # Define neighbor list for CIF atoms to find ECP neighbors around QC atoms
-        cutoffs = [ecp_distance / 2.0] * len(full_structure)
-        nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
-        nl.update(full_structure)
+            # Get neighbors for the current atom with respect to all atoms in the supercell
+            indices, offsets = neighbor_list.get_neighbors(i)
 
-        # Initialize lists to track QC, ECP, and PC atoms
-        qc_atoms = []
-        ecp_atoms = []
-        pc_atoms = []
+            # Only consider neighbors that are valid indices in qc_positions
+            valid_indices = [idx for idx in indices if idx < len(qc_positions)]
 
-        # Match CIF atoms to QC region atoms based on proximity to the QC region's center of mass
-        for atom in full_structure:
-            if np.linalg.norm(atom.position - qc_com) <= ecp_distance:
-                if any(np.linalg.norm(atom.position - xyz_atom.position) < 1.0 for xyz_atom in xyz_atoms):
-                    qc_atoms.append(atom)
-                else:
-                    ecp_atoms.append(Atom(symbol=atom.symbol, position=atom.position))
+            # Check if any of the valid neighbors are in the QC region
+            if valid_indices and np.any(np.linalg.norm(qc_positions[valid_indices] - atom.position, axis=1) < ecp_distance):
+                ecp_atoms_list.append(atom)
             else:
-                pc_atoms.append(Atom(symbol='PC', position=atom.position))
+                pc_atoms_list.append(atom)
 
-        # Combine QC, ECP, and PC atoms into a single Atoms object
-        combined_atoms = Atoms(qc_atoms + ecp_atoms + pc_atoms, cell=full_structure.get_cell(), pbc=True)
-        print(f"QC Region: {len(qc_atoms)}, ECP Layer: {len(ecp_atoms)}, PC Layer: {len(pc_atoms)}")
-        
-        return combined_atoms
+        self.ecp_atoms = Atoms(ecp_atoms_list)
+        self.pc_atoms = Atoms(pc_atoms_list)
+
+        print(f"QC layer: {len(self.qc_atoms)} atoms, ECP layer: {len(self.ecp_atoms)} atoms, PC layer: {len(self.pc_atoms)} atoms.")
+
+    def get_regions(self):
+        """Return the QC, ECP, and PC regions."""
+        return self.qc_atoms, self.ecp_atoms, self.pc_atoms
 
