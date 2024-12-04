@@ -1,5 +1,5 @@
-	.pyenv/
-	notebooks/.ipynb_checkpoints/
-	src/.ipynb_checkpoints/
-	src/old.py
+.pyenv/
+notebooks/.ipynb_checkpoints
+src/.ipynb_checkpoints/
+src/old.py
 src/__pycache__/

@@ -40,6 +40,7 @@ class UserDefinedQCRegion:
         # Create a NeighborList for the supercell atoms
         cutoffs = [ecp_distance] * len(positions)  # One cutoff for each atom in the supercell
         neighbor_list = NeighborList(cutoffs, skin=0.3, sorted=False, self_interaction=True)
+        # the following is dangerous:
         neighbor_list.update(self.supercell)  # Update with supercell atom positions
 
         for i, atom in enumerate(self.supercell):
